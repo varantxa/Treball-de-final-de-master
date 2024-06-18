@@ -46,7 +46,7 @@ lake_csv <- read.csv('/Users/varantxa/Desktop/TFM/Lake/BdD Clinical Trial/Data/l
 library(dplyr)
 library(kableExtra)
 
-# Funció per convertir totes les cadenes a UTF-8 per a poder imprimir una taula
+# Funció per convertir tots els strings a UTF-8 per a poder imprimir una taula
 convert_utf8 <- function(df) {
   df <- df %>%
     mutate(across(where(is.character), ~iconv(.x, from = "latin1", to = "UTF-8")))
