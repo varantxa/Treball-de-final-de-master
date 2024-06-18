@@ -1,0 +1,655 @@
+---
+title: "Realització de l’anàlisi de supervivència d’un tractament antiretroviral i generació automàtica de l’informe de resultats."
+author: "Arantxa Vázquez"
+date: "2024-04-13"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 3
+---
+
+```{r setup, include=FALSE, message=FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+
+library(knitr)
+library(dplyr)
+library(arsenal)
+library(kableExtra)
+library(officer)
+library(flextable)
+
+# Configuració per a capturar totes les gràfiques
+figs <- list()
+fig_index <- 1
+
+hook_output <- knit_hooks$get('plot')
+knit_hooks$set(plot = function(x, options) {
+  figs[[fig_index]] <<- x
+  fig_index <<- fig_index + 1
+  hook_output(x, options)
+})
+```
+
+### Importació de les dades
+
+
+```{r}
+# Importem les dades 
+lake_csv <- read.csv('/Users/varantxa/Desktop/TFM/Lake/BdD Clinical Trial/Data/lake.csv', sep=';', dec = ",")
+
+```
+### Anàlisi descriptiu de les dades
+
+```{r echo=TRUE, results='hide'}
+
+# Carreguem les llibreries necessàries
+library(dplyr)
+library(kableExtra)
+
+# Funció per convertir totes les cadenes a UTF-8 per a poder imprimir una taula
+convert_utf8 <- function(df) {
+  df <- df %>%
+    mutate(across(where(is.character), ~iconv(.x, from = "latin1", to = "UTF-8")))
+  return(df)
+}
+
+# Convertim el dataset a UTF-8 i imprimim les primeres 20 línies
+lake_utf8 <- convert_utf8(lake_csv)
+lake_utf8 %>%
+  head(20) %>%
+  kbl() %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"), 
+                full_width = F)
+```
+
+```{r}
+#Observem l'estructura
+str(lake_csv)
+```
+
+
+```{r}
+# Ara Enumerem els noms de les columnes per tenir una visió general 
+colnames(lake_csv)
+```
+
+
+```{r}
+
+# Farem unes taules demogràfiques per a veure la distribució de les diferents característiques de la mostra 
+# Importem les llibreries necessàries
+library(arsenal)
+library(dplyr)
+library(kableExtra)
+
+# Substituim els valors la columna 'Grupo' pel nom dels medicaments a què corresponen
+lake_csv$Grupo <- ifelse(lake_csv$Grupo == -1, "EFV + Kivexa", 
+                         ifelse(lake_csv$Grupo == 0, "Kaletra + Kivexa", lake_csv$Grupo))
+
+# Seleccionem les variables demogràfiques
+data_demographic <- lake_csv %>%
+  select(sexo, edad, factorriesgo_ADVP, factorriesgo_heterosexual, factorriesgo_homosexual, factorriesgo_hemofilia, factorriesgo_otros, Grupo)
+
+# Creem la taula descriptiva
+table_demographic <- tableby(Grupo ~ sexo + edad + factorriesgo_ADVP + factorriesgo_heterosexual + factorriesgo_homosexual + factorriesgo_hemofilia + factorriesgo_otros, data = data_demographic)
+
+# Imprimim el 'summary' de la taula en format HTML amb kableExtra
+summary_demographic <- summary(table_demographic, text = TRUE)
+
+# Imprimim la taula
+kbl(summary_demographic, format = "html", escape = FALSE) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"), 
+                full_width = F, 
+                position = "center")
+
+
+```
+
+```{r}
+# Farem la taula amb les variables clíniques
+# Importem les llibreries 
+library(arsenal)
+library(dplyr)
+library(kableExtra)
+
+# Seleccionem les variables clíniques
+data_clinical <- lake_csv %>%
+  select(Grupo, estadio_VIH_20, estadio_VIH_31, fecha_vih, Estado)
+
+# Convertim les variables a factors si és necessari
+data_clinical <- data_clinical %>%
+  mutate(across(c(estadio_VIH_20, estadio_VIH_31, Estado), as.factor))
+
+# Comprovem que els nivells siguin únics per a cada variable
+unique_values <- sapply(data_clinical, function(x) length(unique(x)))
+print(unique_values)
+
+# Eliminem variables amb un sol nivell
+data_clinical <- data_clinical %>%
+  select(where(~ length(unique(.)) > 1))
+
+# Creem la taula descriptiva
+table_clinical <- tableby(Grupo ~ ., data = data_clinical)
+
+# Imprimim el 'summary' de la taula en format HTML amb kableExtra
+summary_clinical <- summary(table_clinical, text = TRUE)
+
+# Imprimim la taula
+kbl(summary_clinical, format = "html", escape = FALSE) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"), 
+                full_width = F, 
+                position = "center")
+
+```
+
+```{r}
+# Per últim, farem la taula dels biomarcadors a l'inici de l'estudi 
+# Importem les llibreries 
+library(dplyr)
+library(arsenal)
+library(kableExtra)
+
+# Seleccionem les variables de biomarcadors de la setmana 0
+data_biomarkers_0 <- lake_csv %>%
+  select(Grupo, contains('_0')) %>%
+  select(-contains('week'), -contains('fecha'), -contains('Embarazo'), -contains('diff'))
+
+# Creem la taula descriptiva
+table_biomarkers_0 <- tableby(Grupo ~ ., data = data_biomarkers_0)
+
+# Imprimim el 'summary' de la taula en format HTML amb kableExtra
+summary_biomarkers_0 <- summary(table_biomarkers_0, text = TRUE)
+
+# Imprimim la taula
+kbl(summary_biomarkers_0, format = "html", escape = FALSE) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"), 
+                full_width = F, 
+                position = "center")
+
+```
+
+```{r}
+# Per a poder visualitzar l'evolució de la càrrega viral dels pacients segons el grup de tractament durant tot l'estudi, realitzem una gràfica de línies
+
+# Importem les llibreries
+library(dplyr)
+library(ggplot2)
+library(scales)
+library(tidyr)
+
+# Seleccionem les columnes necessàries i eliminem els missing values
+lake_cv <- lake_csv %>%
+  select(Grupo, nusuario, CargaViral_0, CargaViral_12, CargaViral_24, CargaViral_36, CargaViral_48) %>%
+  drop_na()
+
+# Mutem les dades a format llarg
+lake_cv <- lake_cv %>%
+  gather(key = "Visita", value = "CargaViral", CargaViral_0:CargaViral_48) %>%
+  mutate(Visita = factor(Visita, levels = c("CargaViral_0", "CargaViral_12", "CargaViral_24", "CargaViral_36", "CargaViral_48"),
+                         labels = c("0", "12", "24", "36", "48")))
+
+# Definim la càrrega viral indetectable com a 50 o inferior
+lake_cv <- lake_cv %>%
+  mutate(CargaViral = ifelse(CargaViral <= 50, 50, CargaViral))
+
+# Calculem la mitjana geomètrica i els intervals de confiança per cada grup i visita
+summary_data <- lake_cv %>%
+  group_by(Grupo, Visita) %>%
+  summarise(
+    mean_geom = exp(mean(log(CargaViral))),
+    lower = exp(mean(log(CargaViral)) - qt(0.975, df=n()-1) * sd(log(CargaViral))/sqrt(n())),
+    upper = exp(mean(log(CargaViral)) + qt(0.975, df=n()-1) * sd(log(CargaViral))/sqrt(n()))
+  )
+
+# Creem la gràfica
+ggplot(summary_data, aes(x = Visita, y = mean_geom, group = Grupo, color = Grupo)) +
+  geom_line(size = 1) +
+  geom_point(size = 2) +
+  geom_errorbar(aes(ymin = lower, ymax = upper), width = 0.2) +
+  labs(
+    title = "Evolució de la Càrrega Viral per Grup de Tractament",
+    x = "Visita (setmanes)",
+    y = "Mitjana Geomètrica de la Càrrega Viral",
+    color = "Grup de Tractament"
+  ) +
+  theme_minimal() +
+  scale_y_log10(labels = scales::comma)  # Escala logarítmica per a la càrrega viral
+
+```
+
+
+```{r}
+# Ara farem la gràfica de l'evolució dels valors absoluts i percentatge de CD4 durant tot el tractament segons el grup, en primer lloc per a CD4A
+# Importem les llibreries
+library(tidyverse)
+library(ggplot2)
+
+# Funció per calcular la mitjana geomètrica
+geom_mean <- function(x) {
+  exp(mean(log(x), na.rm = TRUE))
+}
+
+# Funció per calcular l'interval de confiança
+geom_mean_ci <- function(x) {
+  se <- sd(log(x), na.rm = TRUE) / sqrt(length(x))
+  mean_log <- mean(log(x), na.rm = TRUE)
+  lower <- exp(mean_log - 1.96 * se)
+  upper <- exp(mean_log + 1.96 * se)
+  c(lower, upper)
+}
+
+# Reestructurem les dades per tenir una columna de valors i una columna de visites
+lake_csv_long <- lake_csv %>%
+  pivot_longer(
+    cols = matches("^(CD4A)_\\d+$"),
+    names_to = c("marker", "visit"),
+    names_pattern = "(CD4A)_(\\d+)",
+    values_drop_na = TRUE
+  )
+
+# Convertir visit a numèric
+lake_csv_long$visit <- as.numeric(lake_csv_long$visit)
+
+# Agrupar les dades per grup de tractament i visita, i calcular la mitjana geomètrica i IC per CD4A
+summary_cd4a <- lake_csv_long %>%
+  filter(marker == "CD4A") %>%
+  group_by(Grupo, visit) %>%
+  summarise(
+    geom_mean_cd4a = geom_mean(value),
+    lower_ci_cd4a = geom_mean_ci(value)[1],
+    upper_ci_cd4a = geom_mean_ci(value)[2],
+    .groups = 'drop'
+  )
+
+# Gràfica per a CD4A
+ggplot(summary_cd4a, aes(x = visit, y = geom_mean_cd4a, color = Grupo, group = Grupo)) +
+  geom_line() +
+  geom_point() +
+  geom_errorbar(aes(ymin = lower_ci_cd4a, ymax = upper_ci_cd4a), width = 0.2) +
+  labs(title = "Evolució de CD4A per grup de tractament",
+       x = "Visita",
+       y = "Mitjana geomètrica de CD4A") +
+  theme_minimal()
+
+```
+
+```{r}
+# Fem la gràfica per a CD4P
+# Importem les llibreries
+library(tidyverse)
+library(ggplot2)
+
+# Funció per calcular la mitjana geomètrica
+geom_mean <- function(x) {
+  exp(mean(log(x), na.rm = TRUE))
+}
+
+# Funció per calcular l'interval de confiança
+geom_mean_ci <- function(x) {
+  se <- sd(log(x), na.rm = TRUE) / sqrt(length(x))
+  mean_log <- mean(log(x), na.rm = TRUE)
+  lower <- exp(mean_log - 1.96 * se)
+  upper <- exp(mean_log + 1.96 * se)
+  c(lower, upper)
+}
+
+# Reestructurem les dades per tenir una columna de valors i una columna de visites
+lake_csv_long <- lake_csv %>%
+  pivot_longer(
+    cols = matches("^(CD4P)_\\d+$"),
+    names_to = c("marker", "visit"),
+    names_pattern = "(CD4P)_(\\d+)",
+    values_drop_na = TRUE
+  )
+
+# Convertim visit a numèric
+lake_csv_long$visit <- as.numeric(lake_csv_long$visit)
+
+# Agrupem les dades per grup de tractament i visita, i calculem la mitjana geomètrica i IC per CD4P
+summary_cd4p <- lake_csv_long %>%
+  filter(marker == "CD4P") %>%
+  group_by(Grupo, visit) %>%
+  summarise(
+    geom_mean_cd4p = geom_mean(value),
+    lower_ci_cd4p = geom_mean_ci(value)[1],
+    upper_ci_cd4p = geom_mean_ci(value)[2],
+    .groups = 'drop'
+  )
+
+# Gràfica per a CD4P
+ggplot(summary_cd4p, aes(x = visit, y = geom_mean_cd4p, color = Grupo, group = Grupo)) +
+  geom_line() +
+  geom_point() +
+  geom_errorbar(aes(ymin = lower_ci_cd4p, ymax = upper_ci_cd4p), width = 0.2) +
+  labs(title = "Evolució de CD4P per grup de tractament",
+       x = "Visita",
+       y = "Mitjana geomètrica de CD4P") +
+  theme_minimal()
+
+
+```
+
+### Aàlisi Exploratori de les Dades
+```{r}
+# En primer lloc imprimim els estadístics de les variables
+# Summary Statistics
+summary(lake_csv)
+```
+
+
+```{r}
+# Ara generarem gràfiques de densitat per visualitzar la distribució de càrrega viral en log10 a les setmanes 0 i 12
+
+# Carreguem les llibreries necessàries
+library(dplyr)
+library(ggplot2)
+
+# Filtrem i transformem les dades per la visita 0
+lake_cv_0 <- lake_csv %>%
+  select(Grupo, CargaViral_0) %>%
+  filter(!is.na(CargaViral_0)) %>%
+  mutate(CargaViral_0_log10 = log10(ifelse(CargaViral_0 <= 50, 50, CargaViral_0)))
+
+# Gràfica de densitat per la càrrega viral (log10) a la visita 0
+ggplot(lake_cv_0, aes(x = CargaViral_0_log10, fill = Grupo)) +
+  geom_density(alpha = 0.5) +
+  labs(title = "Densitat de la Càrrega Viral (log10) a la Visita 0 per Grup de Tractament",
+       x = "Log10(Càrrega Viral) (copies/mL)",
+       y = "Densitat",
+       fill = "Grup de Tractament") +
+  theme_minimal()
+
+# Filtrem i transformem les dades  
+lake_cv <- lake_csv %>% 
+  select(Grupo, CargaViral_12) %>% # Seleccionem les columnes del grup i de la càrrega viral a la setmana 12
+  filter(!is.na(CargaViral_12)) %>%  # TRaiem les files amb valors nuls a la càrrega viral
+  mutate(CargaViral_12_log10 = log10(ifelse(CargaViral_12 <= 50, 50, CargaViral_12))) # Transformem la càrrega viral a escala log10, ajustant valors inferiors o iguals a 50
+
+# Gràfica de densitat per la càrrega viral en (log10) a la setmana 12
+ggplot(lake_cv, aes(x = CargaViral_12_log10, fill = Grupo)) +
+  geom_density(alpha = 0.5) +
+  labs(title = "Densitat de la Càrrega Viral (log10) a la Setmana 12 per Grup de Tractament",
+       x = "Log10(Càrrega Viral) (copies/mL)",
+       y = "Densitat",
+       fill = "Grup de Tractament") +
+  theme_minimal()
+
+```
+
+
+```{r}
+
+# Ara generarem gràfiques de densitat per visualitzar la distribució de CD4A i CD8A en log10 a les setmanes 0 i 48
+
+# Carreguem les llibreries necessàries
+library(dplyr)
+library(ggplot2)
+
+
+# Filtrem i transformem les dades per CD4A a la setmana 0
+
+lake_cd4a_0 <- lake_csv %>% # Per CD4A a la setmana 0
+  select(Grupo, CD4A_0) %>%
+  filter(!is.na(CD4A_0)) %>%
+  mutate(CD4A_0_log10 = log10(CD4A_0))
+
+# Filtrem i transformem les dades per CD8A a la setmana 0
+
+lake_cd8a_0 <- lake_csv %>% # Per CD8A a la setmana 0
+  select(Grupo, CD8A_0) %>%
+  filter(!is.na(CD8A_0)) %>%
+  mutate(CD8A_0_log10 = log10(CD8A_0))
+
+# Filtrem i transformem les dades per CD4A a la setmana 48
+lake_cd4a_48 <- lake_csv %>% # Per CD4A a la setmana 48
+  select(Grupo, CD4A_48) %>%
+  filter(!is.na(CD4A_48)) %>%
+  mutate(CD4A_48_log10 = log10(CD4A_48))
+
+# Filtrem i transformem les dades per CD8A a la setmana 48
+lake_cd8a_48 <- lake_csv %>% # Per CD8A a la setmana 48
+  select(Grupo, CD8A_48) %>%
+  filter(!is.na(CD8A_48)) %>%
+  mutate(CD8A_48_log10 = log10(CD8A_48))
+
+# Gràfica de densitat per CD4A en (log10) a la visita 0
+ggplot(lake_cd4a_0, aes(x = CD4A_0_log10, fill = Grupo)) +
+  geom_density(alpha = 0.5) +
+  labs(title = "Densitat de CD4A (log10) a la Visita 0 per Grup de Tractament",
+       x = "Log10(CD4A) (cèl·lules/µL)",
+       y = "Densitat",
+       fill = "Grup de Tractament") +
+  theme_minimal()
+
+# Gràfica de densitat per CD8A en (log10) a la visita 0
+ggplot(lake_cd8a_0, aes(x = CD8A_0_log10, fill = Grupo)) +
+  geom_density(alpha = 0.5) +
+  labs(title = "Densitat de CD8A (log10) a la Visita 0 per Grup de Tractament",
+       x = "Log10(CD8A) (cèl·lules/µL)",
+       y = "Densitat",
+       fill = "Grup de Tractament") +
+  theme_minimal()
+
+# Gràfica de densitat per CD4A en (log10) a la setmana 48
+ggplot(lake_cd4a_48, aes(x = CD4A_48_log10, fill = Grupo)) +
+  geom_density(alpha = 0.5) +
+  labs(title = "Densitat de CD4A (log10) a la Setmana 48 per Grup de Tractament",
+       x = "Log10(CD4A) (cèl·lules/µL)",
+       y = "Densitat",
+       fill = "Grup de Tractament") +
+  theme_minimal()
+
+# Gràfica de densitat per CD8A en (log10) a la setmana 48
+ggplot(lake_cd8a_48, aes(x = CD8A_48_log10, fill = Grupo)) +
+  geom_density(alpha = 0.5) +
+  labs(title = "Densitat de CD8A (log10) a la Setmana 48 per Grup de Tractament",
+       x = "Log10(CD8A) (cèl·lules/µL)",
+       y = "Densitat",
+       fill = "Grup de Tractament") +
+  theme_minimal()
+
+```
+
+
+```{r}
+#  Ara farem Boxplots per cd4 i cd8 visita 0 i visita 48 
+# Carreguem les llibreries necessàries
+library(dplyr)
+library(ggplot2)
+
+# Filtrem  i transformem les dades per CD4A a la visita 0
+lake_cd4a_0 <- lake_csv %>%
+  select(Grupo, CD4A_0) %>%
+  filter(!is.na(CD4A_0)) %>%
+  mutate(CD4A_0_log10 = log10(CD4A_0))
+
+# Filtrem i transformem les dades per CD8A a la visita 0
+lake_cd8a_0 <- lake_csv %>%
+  select(Grupo, CD8A_0) %>%
+  filter(!is.na(CD8A_0)) %>%
+  mutate(CD8A_0_log10 = log10(CD8A_0))
+
+# Filtrem i transformem les dades de CD4A per la visita 48
+lake_cd4a_48 <- lake_csv %>%
+  select(Grupo, CD4A_48) %>%
+  filter(!is.na(CD4A_48)) %>%
+  mutate(CD4A_48_log10 = log10(CD4A_48))
+
+
+# Filtrem i transformem les dades de CD8A per la visita 48
+lake_cd8a_48 <- lake_csv %>%
+  select(Grupo, CD8A_48) %>%
+  filter(!is.na(CD8A_48)) %>%
+  mutate(CD8A_48_log10 = log10(CD8A_48))
+
+# Boxplot per CD4A (log10) a la visita 0 i a la visita 48
+ggplot(bind_rows(
+    mutate(lake_cd4a_0, Visita = "0", Valor = CD4A_0_log10),
+    mutate(lake_cd4a_48, Visita = "48", Valor = CD4A_48_log10)
+  ), aes(x = Visita, y = Valor, fill = Grupo)) +
+  geom_boxplot() +
+  labs(title = "Boxplot de CD4A (log10) a la Visita 0 i a la Visita 48",
+       x = "Visita",
+       y = "Log10(CD4A) (cèl·lules/µL)",
+       fill = "Grup de Tractament") +
+  theme_minimal()
+
+# Boxplot per CD8A (log10) a la visita 0 i a la visita 48
+ggplot(bind_rows(
+    mutate(lake_cd8a_0, Visita = "0", Valor = CD8A_0_log10),
+    mutate(lake_cd8a_48, Visita = "48", Valor = CD8A_48_log10)
+  ), aes(x = Visita, y = Valor, fill = Grupo)) +
+  geom_boxplot() +
+  labs(title = "Boxplot de CD8A (log10) a la Visita 0 i a la Visita 48",
+       x = "Visita",
+       y = "Log10(CD8A) (cèl·lules/µL)",
+       fill = "Grup de Tractament") +
+  theme_minimal()
+```
+
+
+### Realitzem l'anàlisi de supervivència
+
+
+
+```{r}
+
+# En primer, farem l'anàlisi de supervivència basant-nos en l'event de càrrega viral indectectable (igual o inferio a 50) a la setmana 12
+
+# Importem les llibreries
+library(dplyr)
+library(lubridate)
+library(survival)
+library(survminer)
+
+# Creem el nou dataset seleccionant les columnes d'interès
+lake_sa <- lake_csv %>% select(Grupo, nusuario, CargaViral_12, Fecha_0, Fecha_12)
+
+# Eliminem els valors faltants
+lake_sa <- lake_sa %>% drop_na()
+
+# Convertim les dates a format Date
+lake_sa <- lake_sa %>%
+  mutate(Fecha_0 = mdy(Fecha_0), Fecha_12 = mdy(Fecha_12))
+
+# Filtrem les files on Fecha_12 no és anterior a Fecha_0
+lake_sa <- lake_sa %>%
+  filter(Fecha_12 >= Fecha_0)
+
+# Afegim la columna categoritzada de la càrrega viral segons el criteri del protocol
+lake_sa <- lake_sa %>% 
+  mutate(CargaViral_12_cat = ifelse(CargaViral_12 <= 50, 1, 0))  # Event = 1, No event = 0
+
+# Calculem la diferència en dies
+lake_sa <- lake_sa %>%
+  mutate(diferencia_dias = as.numeric(difftime(Fecha_12, Fecha_0, units = "days")))
+
+#  Verifiquem els primers valors del conjunt de dades
+print(head(lake_sa, 20))
+
+# Netegem els noms de les columnes eliminant caràcters especials
+lake_sa <- lake_sa %>%
+  mutate(nusuario = iconv(nusuario, from = "UTF-8", to = "ASCII//TRANSLIT"))
+
+# Fem l'anàlisi de supervivencia de Kaplan-Meier
+surv_object <- Surv(time = lake_sa$diferencia_dias, event = lake_sa$CargaViral_12_cat)
+fit_km <- survfit(surv_object ~ Grupo, data = lake_sa)
+
+# Grafiquem la corba de supervivència de Kaplan-Meier
+ggsurvplot(fit_km, data = lake_sa, 
+           pval = TRUE, 
+           conf.int = TRUE,
+           risk.table = TRUE, 
+           ggtheme = theme_minimal(),
+           palette = "Dark2")
+
+# Ajustem el model de Cox segons el tractament amb: 'Grupo', imprimim el resum i la gràfica 
+fit_cox_simple <- coxph(surv_object ~ Grupo, data = lake_sa)
+summary(fit_cox_simple)
+ggforest(fit_cox_simple, data = lake_sa)
+
+```
+
+```{r}
+# En segon lloc, farem l'anàlisi de supervivència basant-nos en l'event d'increment del 10% en CD4P a la setmana 12
+
+# Importem les llibreries
+library(dplyr)
+library(lubridate)
+library(survival)
+library(survminer)
+
+# Creem el nou dataset seleccionant les columnes d'interès
+lake_set <- lake_csv %>% select(Grupo, nusuario, CD4P_0, CD4P_12, Fecha_0, Fecha_12)
+
+# Eliminem els valors faltants
+lake_set <- lake_set %>% drop_na()
+
+# Convertim les dates a format Date
+lake_set <- lake_set %>%
+  mutate(Fecha_0 = mdy(Fecha_0), Fecha_12 = mdy(Fecha_12))
+
+# Filtem les files on Fecha_12 no és anterior a Fecha_0
+lake_set <- lake_set %>%
+  filter(Fecha_12 >= Fecha_0)
+
+# Calculem l'increment del 10% en CD4P
+lake_set <- lake_set %>% 
+  mutate(CD4P_10_percent_increase = CD4P_0 * 1.10)
+
+# Afegim la columna categorizada de l'event
+lake_set <- lake_set %>% 
+  mutate(event = ifelse(CD4P_12 >= CD4P_10_percent_increase, 1, 0))  # Evento = 1, No evento = 0
+
+# Calculem la diferència en dies
+lake_set <- lake_set %>%
+  mutate(diferencia_dias = as.numeric(difftime(Fecha_12, Fecha_0, units = "days")))
+
+# Verifiquem els primers valors del conjunt de dades
+print(head(lake_set, 20))
+
+# Netejem els noms de les columnes eliminant caràcters especials
+lake_set <- lake_set %>%
+  mutate(nusuario = iconv(nusuario, from = "UTF-8", to = "ASCII//TRANSLIT"))
+
+# Anàlisi de supervivència de Kaplan-Meier
+surv_object <- Surv(time = lake_set$diferencia_dias, event = lake_set$event)
+fit_km <- survfit(surv_object ~ Grupo, data = lake_set)
+
+# Grafiquem la corba de supervivència de Kaplan-Meier
+ggsurvplot(fit_km, data = lake_set, 
+           pval = TRUE, 
+           conf.int = TRUE,
+           risk.table = TRUE, 
+           ggtheme = theme_minimal(),
+           palette = "Dark2")
+
+# Ajustem el model de Cox segons el tractament amb: 'Grupo', imprimim el resum i la gràfica 
+fit_cox_simp <- coxph(surv_object ~ Grupo, data = lake_set)
+summary(fit_cox_simp)
+ggforest(fit_cox_simp, data = lake_set)
+
+```
+```{r}
+
+# Creem una funció per afegir gràfiques al document Word
+add_figs_to_doc <- function(doc, figs) {
+  for (i in seq_along(figs)) {
+    doc <- doc %>%
+      body_add_par(paste("Gràfic", i), style = "heading 2") %>%
+      body_add_img(src = figs[[i]], width = 6, height = 4, style = "centered")
+  }
+  return(doc)
+}
+
+# Creem un document de Word buit
+doc <- read_docx()
+
+# Afegim les gràfiques al document de Word
+doc <- add_figs_to_doc(doc, figs)
+
+# Guardem el document de Word
+print(doc, target = "Gràfiques_TFM.docx")
+
+```
+
